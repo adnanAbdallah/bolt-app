@@ -1,8 +1,11 @@
 import { useCallback, useEffect, useState } from 'react';
-import { CheckCircle2, Clock, Inbox, Play, Power, Wallet, XCircle } from 'lucide-react';
+import { CheckCircle2, Clock, Inbox, LocateFixed, Play, Power, Wallet, XCircle } from 'lucide-react';
 import { useAuth } from '../context/AuthContext.jsx';
-import { api, formatMoney } from '../lib/api.js';
+import { useOnReconnect, useSocket, useSocketEvent } from '../context/SocketContext.jsx';
+import { api, formatMoney, timeAgo } from '../lib/api.js';
 import { usePolling } from '../lib/usePolling.js';
+import { useDriverLocation } from '../lib/useDriverLocation.js';
+import DriverDocuments from '../components/DriverDocuments.jsx';
 import Avatar from '../components/Avatar.jsx';
 import ErrorBanner from '../components/ErrorBanner.jsx';
 import RideProgress from '../components/RideProgress.jsx';
@@ -10,21 +13,36 @@ import RouteSummary from '../components/RouteSummary.jsx';
 import Spinner from '../components/Spinner.jsx';
 import StatusBadge from '../components/StatusBadge.jsx';
 
-const POLL_MS = 4000;
+// New requests and cancellations arrive over the socket; polling is only a safety net.
+const FALLBACK_POLL_MS = 20000;
 
-const timeAgo = (iso) => {
-  const s = Math.max(0, Math.round((Date.now() - new Date(iso)) / 1000));
-  return s < 60 ? `${s}s ago` : `${Math.round(s / 60)}m ago`;
-};
-
-function OnlineToggle({ isOnline, onToggle, busy }) {
+function LocationLine({ location }) {
+  const { mode, setMode, source, error } = location;
   return (
-    <div className={`card flex items-center justify-between ${isOnline ? 'border-brand-100 bg-brand-50' : ''}`}>
-      <div>
+    <p className="mt-1 flex flex-wrap items-center gap-x-2 text-xs text-gray-500">
+      <LocateFixed className={`h-3.5 w-3.5 ${source ? 'text-brand-600' : ''}`} />
+      {source === 'gps' ? 'Sharing GPS location' : source === 'simulated' ? 'Sharing simulated location' : 'Starting location…'}
+      {error && mode === 'gps' && <span className="text-amber-600">({error})</span>}
+      <button
+        type="button"
+        onClick={() => setMode(mode === 'gps' ? 'simulated' : 'gps')}
+        className="font-medium text-brand-700 underline-offset-2 hover:underline"
+      >
+        Use {mode === 'gps' ? 'simulated' : 'real GPS'}
+      </button>
+    </p>
+  );
+}
+
+function OnlineToggle({ isOnline, onToggle, busy, location }) {
+  return (
+    <div className={`card flex items-center justify-between gap-3 ${isOnline ? 'border-brand-100 bg-brand-50' : ''}`}>
+      <div className="min-w-0">
         <p className="font-semibold">{isOnline ? "You're online" : "You're offline"}</p>
         <p className="text-sm text-gray-500">
           {isOnline ? 'Receiving ride requests nearby' : 'Go online to start receiving requests'}
         </p>
+        {isOnline && <LocationLine location={location} />}
       </div>
       <button
         onClick={onToggle}
@@ -173,8 +191,25 @@ export default function DriverDashboard() {
     loadHistory().catch(() => {});
   }, [loadHistory]);
 
-  // Poll for new requests while online, and for passenger cancellations while on a trip.
-  usePolling(refresh, POLL_MS, isOnline || Boolean(activeRide) || loading);
+  usePolling(refresh, FALLBACK_POLL_MS, isOnline || Boolean(activeRide) || loading);
+  useOnReconnect(refresh);
+  useSocketEvent('rides:changed', () => {
+    if (isOnline && !activeRide) refresh();
+  });
+  useSocketEvent('ride:updated', ({ ride }) => {
+    if (activeRide?.id !== ride.id) return;
+    if (ride.status === 'completed' || ride.status === 'cancelled') {
+      setActiveRide(null);
+      loadHistory().catch(() => {});
+      if (ride.cancelledBy === 'passenger') setError('The passenger cancelled this ride.');
+      if (ride.cancelledBy === 'admin') setError('Support closed this ride.');
+    } else {
+      setActiveRide(ride);
+    }
+  });
+
+  const { socket } = useSocket();
+  const location = useDriverLocation(socket, isOnline);
 
   const run = async (fn) => {
     setBusy(true);
@@ -224,7 +259,13 @@ export default function DriverDashboard() {
   return (
     <div className="space-y-4">
       <ErrorBanner message={error} onClose={() => setError(null)} />
-      <OnlineToggle isOnline={isOnline} onToggle={toggleOnline} busy={busy || Boolean(activeRide)} />
+      {!user.verified && <DriverDocuments user={user} onUpdated={setUser} />}
+      <OnlineToggle
+        isOnline={isOnline}
+        onToggle={toggleOnline}
+        busy={busy || Boolean(activeRide)}
+        location={location}
+      />
 
       {activeRide ? (
         <CurrentTrip ride={activeRide} busy={busy} onStart={start} onComplete={complete} onCancel={cancel} />

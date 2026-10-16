@@ -22,7 +22,7 @@ export async function upsertGoogleUser({ googleId, email, name, avatar, requeste
       : SELF_ASSIGNABLE_ROLES.includes(requestedRole)
         ? requestedRole
         : 'passenger';
-    return User.create({ googleId, email: normalizedEmail, name, avatar, role });
+    return User.create({ googleId, email: normalizedEmail, name: name || normalizedEmail.split('@')[0], avatar, role });
   }
 
   user.googleId ??= googleId;

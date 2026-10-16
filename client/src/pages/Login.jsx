@@ -12,6 +12,7 @@ const ERROR_MESSAGES = {
   invalid_state: 'Sign-in link expired. Please try again.',
   auth_failed: 'Google sign-in was cancelled or failed.',
   server_error: 'Something went wrong on our side. Please try again.',
+  account_banned: 'This account has been suspended. Contact support if you think this is a mistake.',
 };
 
 const ROLES = [

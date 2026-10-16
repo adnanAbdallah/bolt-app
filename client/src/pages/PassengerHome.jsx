@@ -2,6 +2,8 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { CheckCircle2, Circle, Clock, MapPin, Navigation, Phone, XCircle, Zap } from 'lucide-react';
 import { api, formatMoney } from '../lib/api.js';
 import { usePolling } from '../lib/usePolling.js';
+import { useOnReconnect, useSocketEvent } from '../context/SocketContext.jsx';
+import ReportProblem from '../components/ReportProblem.jsx';
 import Avatar from '../components/Avatar.jsx';
 import ErrorBanner from '../components/ErrorBanner.jsx';
 import RideProgress from '../components/RideProgress.jsx';
@@ -9,7 +11,8 @@ import RouteSummary from '../components/RouteSummary.jsx';
 import Spinner from '../components/Spinner.jsx';
 import StatusBadge from '../components/StatusBadge.jsx';
 
-const POLL_MS = 4000;
+// Live updates arrive over the socket; polling is only a safety net.
+const FALLBACK_POLL_MS = 20000;
 
 function FareQuote({ quote, loading }) {
   if (loading && !quote) {
@@ -155,7 +158,7 @@ function BookingForm({ onRequested }) {
   );
 }
 
-function ActiveRide({ ride, onCancel, onDone, busy }) {
+function ActiveRide({ ride, onCancel, onDone, onChange, busy }) {
   const finished = ride.status === 'completed' || ride.status === 'cancelled';
   const headline = {
     requested: 'Finding you a rider…',
@@ -222,6 +225,10 @@ function ActiveRide({ ride, onCancel, onDone, busy }) {
           <XCircle className="h-5 w-5" /> Cancel ride
         </button>
       )}
+      {/* Reportable: finished trips, and rides the driver cancelled (e.g. no-shows). */}
+      {(ride.status === 'completed' || ride.cancelledBy === 'driver') && (
+        <ReportProblem ride={ride} onReported={onChange} exclude={['passenger_behavior']} />
+      )}
       {finished && (
         <button onClick={onDone} className="btn-primary w-full">
           <CheckCircle2 className="h-5 w-5" /> Book another ride
@@ -258,7 +265,12 @@ export default function PassengerHome() {
   }, []);
 
   const shouldPoll = loading || (ride && !['completed', 'cancelled'].includes(ride.status));
-  usePolling(poll, POLL_MS, shouldPoll);
+  usePolling(poll, FALLBACK_POLL_MS, shouldPoll);
+  useOnReconnect(poll);
+  useSocketEvent('ride:updated', ({ ride: updated }) => {
+    const current = rideRef.current;
+    if (!current || current.id === updated.id) setRide(updated);
+  });
 
   const handleCancel = async () => {
     if (!confirm('Cancel this ride?')) return;
@@ -280,7 +292,7 @@ export default function PassengerHome() {
     <>
       <ErrorBanner message={error} onClose={() => setError(null)} />
       {ride ? (
-        <ActiveRide ride={ride} busy={busy} onCancel={handleCancel} onDone={() => setRide(null)} />
+        <ActiveRide ride={ride} busy={busy} onCancel={handleCancel} onChange={setRide} onDone={() => setRide(null)} />
       ) : (
         <BookingForm onRequested={setRide} />
       )}
