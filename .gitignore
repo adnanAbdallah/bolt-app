@@ -2,3 +2,6 @@ node_modules/
 .env
 dist/
 *.log
+
+# Google OAuth credentials downloaded from Cloud Console
+client_secret_*.json
