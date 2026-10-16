@@ -13,7 +13,12 @@ const router = Router();
 export const homePathFor = (role) => ({ driver: '/driver', admin: '/admin' })[role] ?? '/ride';
 
 router.get('/config', (_req, res) => {
-  res.json({ googleEnabled, devLoginEnabled: env.devLogin });
+  res.json({
+    googleEnabled,
+    devLoginEnabled: env.devLogin,
+    locationMode: env.locationMode,
+    map: env.map,
+  });
 });
 
 // Step 1: /api/auth/google?role=driver  -> redirect to Google consent screen

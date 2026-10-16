@@ -7,12 +7,14 @@
  *   npm run seed:clear   remove demo data only
  *
  * Only touches users with isDemo: true (emails @demo.boltmoto.test) and their rides.
+ * Routes are straight-line estimates (no calls to the routing service) so seeding is fast and offline.
  */
 import mongoose from 'mongoose';
 import { connectDB } from '../src/config/db.js';
 import { CITY_CENTER, estimateFare } from '../src/services/fare.js';
 import { REPORT_REASONS, Ride } from '../src/models/Ride.js';
 import { User } from '../src/models/User.js';
+import { bearing, distanceM, offset } from '../src/lib/geometry.js';
 
 const DOMAIN = 'demo.boltmoto.test';
 const clearOnly = process.argv.includes('--clear');
@@ -43,6 +45,23 @@ const pick = (arr, i) => arr[i % arr.length];
 const slug = (name) => name.toLowerCase().replace(/[^a-z]+/g, '.');
 const minutesAgo = (m) => new Date(Date.now() - m * 60_000);
 const jitter = () => (Math.random() - 0.5) * 0.06;
+
+/** Breadcrumbs every ~50 m along pickup → (optional detour) → dropoff, for the dispute map demo. */
+function syntheticTrail(from, to, start, detourM = 0) {
+  const mid = offset(
+    { lat: (from.lat + to.lat) / 2, lng: (from.lng + to.lng) / 2 },
+    detourM,
+    (bearing(from, to) + 90) % 360,
+  );
+  const legs = detourM ? [[from, mid], [mid, to]] : [[from, to]];
+  const pts = [];
+  for (const [a, b] of legs) {
+    const n = Math.max(2, Math.round(distanceM(a, b) / 50));
+    for (let i = 0; i < n; i++) pts.push({ lat: a.lat + ((b.lat - a.lat) * i) / n, lng: a.lng + ((b.lng - a.lng) * i) / n });
+  }
+  pts.push({ lat: to.lat, lng: to.lng });
+  return pts.map((p, i) => ({ ...p, at: new Date(start.getTime() + i * 6000) }));
+}
 
 async function clearDemo() {
   const ids = (await User.find({ isDemo: true }).select('_id').lean()).map((u) => u._id);
@@ -104,7 +123,7 @@ async function seed() {
     const pickup = pick(PLACES, i * 7 + 3);
     let dropoff = pick(PLACES, i * 5 + 11);
     if (dropoff === pickup) dropoff = pick(PLACES, i + 1);
-    const quote = await estimateFare(pickup, dropoff);
+    const quote = await estimateFare(pickup, dropoff, { offline: true });
     const passenger = pick(passengers.slice(0, 9), i);
     const driver = pick(verified, i);
     const cancelled = i % 6 === 4;
@@ -113,8 +132,9 @@ async function seed() {
 
     const ride = {
       passengerId: passenger._id,
-      pickupLocation: quote.pickup,
+      pickupLocation: { ...quote.pickup, area: quote.pickup.address },
       dropoffLocation: quote.dropoff,
+      route: quote.route,
       fare: quote.fare,
       currency: quote.currency,
       distanceKm: quote.distanceKm,
@@ -154,8 +174,12 @@ async function seed() {
   const driverCancelled = rides.filter((r) => r.cancelledBy === 'driver');
 
   report(completed[1], 'overcharged', 'The app quoted much less than I was charged. The rider took a long detour through Ngong Road.', minutesAgo(40));
+  // Recorded trails: a clear detour on the reported rides, a direct trip on another.
+  completed[1].trail = syntheticTrail(completed[1].pickupLocation, completed[1].dropoffLocation, completed[1].startedAt, 1400);
+  completed[2].trail = syntheticTrail(completed[2].pickupLocation, completed[2].dropoffLocation, completed[2].startedAt);
   report(driverCancelled[0], 'no_show', 'Driver accepted, then cancelled after I waited 10 minutes at the pickup.', minutesAgo(70));
   const refunded = completed[4];
+  refunded.trail = syntheticTrail(refunded.pickupLocation, refunded.dropoffLocation, refunded.startedAt, 900);
   report(refunded, 'route', 'Route was much longer than needed.', minutesAgo(1500));
   const refund = Math.round(refunded.fare * 0.3 * 100) / 100;
   refunded.refundedAmount = refund;
@@ -173,13 +197,14 @@ async function seed() {
     { driver: null, status: 'requested', p: passengers[2] },
   ];
   for (const [i, l] of live.entries()) {
-    const quote = await estimateFare(pick(PLACES, i + 2), pick(PLACES, i + 9));
+    const quote = await estimateFare(pick(PLACES, i + 2), pick(PLACES, i + 9), { offline: true });
     const created = minutesAgo(6 - i);
     rides.push({
       passengerId: l.p._id,
       driverId: l.driver?._id ?? null,
-      pickupLocation: quote.pickup,
+      pickupLocation: { ...quote.pickup, area: quote.pickup.address },
       dropoffLocation: quote.dropoff,
+      route: quote.route,
       fare: quote.fare,
       currency: quote.currency,
       distanceKm: quote.distanceKm,

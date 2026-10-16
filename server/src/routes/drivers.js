@@ -42,8 +42,8 @@ router.patch(
 router.post(
   '/location',
   asyncHandler(async (req, res) => {
-    await updateDriverLocation(req.user._id, req.body ?? {});
-    res.json({ ok: true });
+    const result = await updateDriverLocation(req.user._id, req.body ?? {});
+    res.status(result.ok ? 200 : 422).json(result);
   }),
 );
 

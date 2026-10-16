@@ -81,6 +81,8 @@ userSchema.methods.toPublicJSON = function toPublicJSON() {
       vehicle: this.vehicle ?? null,
       documents: serializeDocuments(this.documents),
       verified: this.isVerifiedDriver(),
+      // The driver's own last position (lets the dev simulator resume where it stopped).
+      location: this.location?.lat != null ? { lat: this.location.lat, lng: this.location.lng, heading: this.location.heading ?? null } : null,
     }),
   };
 };

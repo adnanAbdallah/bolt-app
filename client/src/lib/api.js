@@ -52,6 +52,11 @@ export const api = {
   reportReasons: () => request('/rides/report-reasons'),
   reportRide: (id, reason, details) => request(`/rides/${id}/report`, { method: 'POST', body: { reason, details } }),
 
+  // Maps (pickup/dropoff are { address, lat, lng } places)
+  geoSearch: (q, near) => request(`/geo/search${qs({ q, lat: near?.lat, lng: near?.lng })}`),
+  geoReverse: (lat, lng) => request(`/geo/reverse${qs({ lat, lng })}`),
+  geoRoute: (from, to) => request(`/geo/route${qs({ from: `${from.lat},${from.lng}`, to: `${to.lat},${to.lng}` })}`),
+
   // Driver
   setOnline: (isOnline) => request('/drivers/status', { method: 'PATCH', body: { isOnline } }),
   uploadDocument: (type, file) =>

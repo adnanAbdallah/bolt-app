@@ -9,6 +9,7 @@ import authRoutes from './routes/auth.js';
 import rideRoutes from './routes/rides.js';
 import driverRoutes from './routes/drivers.js';
 import adminRoutes from './routes/admin.js';
+import geoRoutes from './routes/geo.js';
 import { errorHandler, notFound } from './middleware/error.js';
 import { initRealtime } from './services/realtime.js';
 import { startDemoFleet } from './services/demoFleet.js';
@@ -27,6 +28,7 @@ app.use('/api/auth', authRoutes);
 app.use('/api/rides', rideRoutes);
 app.use('/api/drivers', driverRoutes);
 app.use('/api/admin', adminRoutes);
+app.use('/api/geo', geoRoutes);
 
 app.use('/api', notFound);
 app.use(errorHandler);
@@ -40,6 +42,6 @@ if (modifiedCount) console.log(`Backfilled status on ${modifiedCount} existing u
 const server = http.createServer(app);
 initRealtime(server);
 server.listen(env.port, () => {
-  console.log(`API + realtime listening on ${env.serverUrl}`);
+  console.log(`API + realtime listening on ${env.serverUrl} (location mode: ${env.locationMode})`);
   if (env.simulateDemoFleet) startDemoFleet();
 });

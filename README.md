@@ -4,6 +4,7 @@ Motorcycle ride-hailing app.
 
 - **Level 1:** Google sign-in, passenger booking with dynamic fares, and a driver dashboard that moves rides through `requested → accepted → ongoing → completed`.
 - **Level 2:** an admin dashboard (analytics, user and driver management with document verification, a live fleet map, dispute resolution) and real-time updates over Socket.IO.
+- **Level 3:** real maps. Passengers search addresses or drop pins, see the road route, and watch their driver move toward them with a live ETA. Drivers get a map, navigation links, and either a dev route stepper (development) or real GPS tracking (production). Admins see trip routes and compare the planned route with the driver's actual trail.
 
 ## Structure
 
@@ -26,12 +27,18 @@ server/                      Express + Mongoose API (port 5001)
       rides.js               /api/rides/* (estimate, request, accept, start, complete, cancel, report)
       drivers.js             /api/drivers/* (online toggle, document upload, location)
       admin.js               /api/admin/* (stats, users, verification, fleet, trips, disputes)
+      geo.js                 /api/geo/* (search, reverse, route)
     services/
       token.js               JWT + cookie helpers, signed OAuth state
       fare.js                Mock geocoding + dynamic (surge) pricing
       realtime.js            Socket.IO server: auth, rooms, events
       rideView.js            Ride JSON shape shared by API and sockets
-      demoFleet.js           Dev-only simulator that moves seeded demo drivers
+      demoFleet.js           Dev-only simulator: demo drivers ride real roads
+      geo.js                 Address search + reverse geocoding (Photon), offline fallback
+      routing.js             Road routes (OSRM), straight-line fallback
+    lib/
+      geometry.js            Distances, bearings, points along a route (shared with client)
+      throttle.js            1 req/s queue + cache for public map services, per-user limits
   scripts/seed.js            Demo data for the admin dashboard
 client/                      Vite + React + Tailwind v4 + Lucide (port 5173)
   src/
@@ -40,13 +47,17 @@ client/                      Vite + React + Tailwind v4 + Lucide (port 5173)
     context/SocketContext.jsx One Socket.IO connection per user + useSocketEvent hook
     lib/api.js               Fetch wrapper for every endpoint
     lib/usePolling.js        Fallback polling (sockets carry live updates)
-    lib/useDriverLocation.js Streams driver GPS (or a simulated route) while online
+    lib/useDriverLocation.js Driver position: dev route stepper or real GPS, ETA, arrival
+    lib/geometry.js          Same helpers as the server (keep in sync)
+    lib/appConfig.js         Server settings (location mode, map tiles, map centre)
+    components/map/          Shared <Map> (Leaflet, lazy-loaded) and marker HTML
+    components/PlaceInput.jsx Address autocomplete
     components/              Layout, ProtectedRoute, RideProgress, ReportProblem, DriverDocuments, …
     components/admin/        AdminLayout (sidebar), FleetMap (Leaflet), RideDialogs, ui kit
     pages/
       Login.jsx              Role picker + Google button (+ dev login)
-      PassengerHome.jsx      Booking form, live fare quote, active-ride tracker
-      DriverDashboard.jsx    Online toggle, incoming requests, current trip, earnings
+      PassengerHome.jsx      Address search + map booking, fare, live driver tracking + ETA
+      DriverDashboard.jsx    Map, dev stepper or GPS, requests, current trip, navigation
       admin/                 Overview, Fleet, Users, Trips, Disputes (lazy-loaded)
 ```
 
@@ -92,6 +103,13 @@ Demo users have emails ending in `@demo.boltmoto.test`. The seed only removes an
 2. Add the new settings to `server/.env` (see [Configuration](#configuration)), then restart both servers.
 3. Drivers created before Level 2 have no approved documents, so they **can't go online** until an admin approves them. Either open **Users & drivers → Documents** in the admin dashboard, or set `REQUIRE_DRIVER_VERIFICATION=false` while testing.
 4. Existing rides and users need no migration. New fields get defaults the first time they are saved.
+
+### Upgrading from Level 2
+
+1. No new packages are needed.
+2. Add the map settings to `server/.env` (see [Configuration](#configuration)). Every one has a working default, so this is optional for local testing. Set `MAP_CENTER` to your city if you are not testing around Nairobi.
+3. Restart both servers.
+4. Rides created before Level 3 have no stored route or trail. Maps draw them with straight lines, and the dispute view says "No GPS trail was recorded". Re-run `npm run seed` to get demo rides with routes and trails.
 
 ### Google sign-in setup
 
@@ -185,10 +203,10 @@ Admin access is granted only by `ADMIN_EMAILS` in `server/.env`, never chosen at
 | Page | Path | What you can do |
 |---|---|---|
 | Overview | `/admin` | Rides today, drivers online, revenue today (each compared with yesterday), registered users, today's rides by status, a "needs attention" list, revenue totals, live trips |
-| Live fleet | `/admin/fleet` | Map of every online driver, updated in real time. Marker color and icon show the driver's state: available, heading to pickup, on trip, or no signal for 2 minutes. Search by name or plate, and click a driver to find them on the map |
+| Live fleet | `/admin/fleet` | Map of every online driver, updated in real time. Marker color and icon show the driver's state: available, heading to pickup, on trip, or no signal for 2 minutes. Search by name or plate, and click a driver to find them on the map. A selected driver on a trip also shows their route and the pickup and dropoff |
 | Users & drivers | `/admin/users` | Search and filter all accounts, review driver license and insurance (approve, or reject with a note), suspend with a reason, reactivate |
 | Active trips | `/admin/trips` | Every ride that hasn't finished, grouped by status. Requests waiting over 5 minutes are highlighted. Force-complete or cancel a stuck ride |
-| Disputes | `/admin/disputes` | Reported and cancelled rides. See the report and the full timeline, issue full or partial refunds, override the status, and resolve with a message to the passenger |
+| Disputes | `/admin/disputes` | Reported and cancelled rides. See the report, the full timeline, and a map comparing the planned route with the driver's actual trail (flagged when the trail is over 25% longer). Issue full or partial refunds, override the status, and resolve with a message to the passenger |
 
 The sidebar shows live counts (drivers online, pending reviews, active trips, open disputes) and whether live updates are connected. On phones it collapses into a menu.
 
@@ -214,6 +232,15 @@ All server settings live in `server/.env`. `server/.env.example` lists them with
 | `ENABLE_DEV_LOGIN` | `false` | `true` shows the email-only Dev login (never in production) |
 | `REQUIRE_DRIVER_VERIFICATION` | `true` | Drivers need an approved license and insurance before going online |
 | `SIMULATE_DEMO_FLEET` | `false` | `true` moves seeded demo drivers on the Live fleet map (never in production) |
+| `LOCATION_MODE` | `simulated` in development, `gps` in production | `simulated`: drivers move along routes with the dev controls. `gps`: real device GPS only; the server rejects simulated positions |
+| `MAP_CENTER` | `-1.2864,36.8172` | Default map view and demo city, as `lat,lng` |
+| `MAP_TILE_URL`, `MAP_TILE_ATTRIBUTION` | OpenStreetMap | Map tiles. The public OSM tile server is for light development use; use your own or a provider in production |
+| `GEOCODER` | `photon` | Address search: `photon` or `mock` (offline, made-up coordinates) |
+| `GEOCODER_URL` | `https://photon.komoot.io` | Photon server |
+| `ROUTING` | `osrm` | Road routes: `osrm` or `straight` (offline straight line × 1.3) |
+| `ROUTING_URL` | `https://router.project-osrm.org` | OSRM server. The public demo server is for development only |
+| `ROUTE_DURATION_FACTOR` | `1.5` | OSRM's car times assume empty roads; this scales them for city traffic (ETAs and the time part of fares) |
+| `GEO_USER_AGENT` | `BoltMotoDev/0.1 (local development)` | Sent to the map services, as their usage policies require. Put your app name and contact in production |
 | `FARE_CURRENCY` | `USD` | Currency code for fares, e.g. `KES` |
 | `FARE_BASE`, `FARE_PER_KM`, `FARE_PER_MIN`, `FARE_MINIMUM` | `1.00`, `0.45`, `0.08`, `2.00` | Pricing inputs (see Fares below) |
 
@@ -223,7 +250,7 @@ Client: `API_PROXY` (default `http://localhost:5001`) changes where the Vite dev
 
 **Auth.** `/api/auth/google?role=driver` sends the chosen role through a signed, short-lived OAuth `state`. On the callback, the user is found or created and a 7-day JWT is set as an `httpOnly` cookie. The browser is then redirected by role: passengers to `/ride`, drivers to `/driver`, admins to `/admin`. The role is fixed at first sign-in. Users cannot choose `admin`; it is granted only to emails listed in `ADMIN_EMAILS`.
 
-**Fares.** `services/fare.js` maps each address to stable mock coordinates, then computes distance and duration. The fare is `base + perKm·km + perMin·min`, multiplied by a surge factor. Surge depends on open requests per online driver (1.0×–2.0×) plus a 1.2× peak-hour bump, capped at 2.5×. The server always recalculates the fare when a ride is requested and ignores any fare the client sends.
+**Fares.** The passenger picks places by address search or map pins. `services/routing.js` gets the road route, and its distance and duration price the trip. If the routing service is unreachable, a straight line × 1.3 is used instead. The fare is `base + perKm·km + perMin·min`, multiplied by a surge factor. Surge depends on open requests per online driver (1.0×–2.0×) plus a 1.2× peak-hour bump, capped at 2.5×. The server always recalculates the fare when a ride is requested and ignores any fare the client sends.
 
 **State transitions.** These are defined once in `Ride.TRANSITIONS`. Each transition is a single atomic `findOneAndUpdate` filtered on the current status, so two drivers cannot both accept the same ride.
 
@@ -244,13 +271,41 @@ Other rules: a passenger can have only one active ride, a driver can have only o
 |---|---|---|
 | `ride:updated` | the ride's passenger and driver, and admins | any status change, report, refund, override or resolution |
 | `rides:changed` | all drivers | the open request list changed |
+| `ride:driver-location` | **only** the passenger of the driver's active ride | every accepted driver position while the ride is accepted or ongoing |
 | `fleet:update` / `fleet:remove` | admins | a driver moved, went online or offline, or started or ended a trip |
 | `stats:changed` | admins | dashboard numbers changed |
 | `user:updated` | that user | a document was approved or rejected |
 | `account:banned` | that user | the account was suspended (they are signed out) |
-| `driver:location` (client → server) | — | an online driver's position, accepted at most every 1.5 s |
+| `driver:location` (client → server, with acknowledgement) | — | an online driver's position. Accepted at most every 1.5 s in gps mode, 0.2 s in simulated mode. The reply is `{ ok }` or `{ ok: false, reason }` |
 
-**Driver location.** While online, the driver app sends its position over the socket. In development it sends a simulated route around the demo city by default, because your real location is far from the mock map. The driver can switch to real GPS from the dashboard. If GPS permission is denied, it falls back to simulation.
+**Maps and routes.** Every map is one shared Leaflet component (`components/map/Map.jsx`), loaded only on screens that show a map. Address search goes through the server (`/api/geo/search`), which uses Photon. Nominatim is not used for search because its usage policy forbids type-ahead autocomplete. Requests to the public map services go through a 1 request/second queue with caching, and fall back to offline estimates if a service is down.
+
+A ride stores three lines:
+
+| Line | What it is | Who sees it |
+|---|---|---|
+| `route` | Planned pickup → dropoff road route; the fare is priced on it | Passenger, assigned driver, admins |
+| `approachRoute` | Driver's position at accept time → pickup | Passenger, assigned driver, admins |
+| `trail` | Breadcrumbs of where the driver actually went (every 50 m, up to 2,000 points) | Admins only (Disputes) |
+
+**Privacy.** Before accepting, a driver sees the pickup only as "Near <neighbourhood>" and a 600 m circle, snapped to a grid so repeated requests can't narrow it down. They see no route line and no passenger phone number. The exact pickup appears after they accept. A passenger receives their driver's position only while their ride is accepted or ongoing.
+
+**Driver location: development (`LOCATION_MODE=simulated`).** The driver dashboard shows a **Dev mode** panel. The driver moves along the actual road route:
+- **Next** / **Back** move one step (50, 100 or 250 m).
+- **Auto-play** moves at 15, 25 or 40 km/h.
+- **Jump to pickup** / **Jump to dropoff** go straight to the end of the leg.
+- A readout shows progress, for example "1.2 km of 3.4 km to pickup · ETA 6 min".
+
+Within 50 m of the pickup or dropoff, an "Arrived" prompt offers **Start trip** or **Complete trip**. With no ride, the driver cruises along a route to a random nearby point. If a passenger books far from the simulated driver (for example in your real city while `MAP_CENTER` is Nairobi), accepting places the driver about 1.5 km from the pickup so the flow still works.
+
+**Driver location: production (`LOCATION_MODE=gps`).** Only real device GPS is used, and the server rejects simulated positions:
+- Before going online, the app asks for location permission. If it's denied, the driver can't go online and sees how to allow it.
+- Fixes with accuracy worse than 100 m, or jumps implying more than 150 km/h, are ignored on the phone and on the server.
+- Positions are sent every 3 s, or after 20 m of movement.
+- With no fix for 30 s, the driver sees a warning, and the passenger and admin see "No recent signal".
+- The screen is kept awake while the driver is online.
+
+Two platform limits apply. Browsers allow geolocation only over **HTTPS**, and they pause GPS when the tab is in the background or the phone is locked. Real background tracking needs a native app or an installable PWA wrapper.
 
 **Driver verification.** With `REQUIRE_DRIVER_VERIFICATION=true` (the default), a driver can go online only after an admin approves both their license and their insurance. Uploads are mocks: only the file name and size are stored. Rejecting a document requires a note, which the driver sees, and takes an online driver offline unless they are mid-trip.
 
@@ -296,7 +351,12 @@ Every action is appended to the ride's `events` timeline, together with who did 
 | POST   | `/api/rides/:id/report`      | passenger/driver of that ride |
 | PATCH  | `/api/drivers/status`        | driver (verified) |
 | POST   | `/api/drivers/documents/:type` | driver (`license` or `insurance`) |
-| POST   | `/api/drivers/location`      | driver (HTTP fallback for the socket event) |
+| POST   | `/api/drivers/location`      | driver (HTTP fallback for the socket event; `422` with a reason if rejected) |
+| GET    | `/api/geo/search?q=&lat=&lng=` | signed in (address autocomplete, 3+ characters) |
+| GET    | `/api/geo/reverse?lat=&lng=` | signed in (address for a map pin) |
+| GET    | `/api/geo/route?from=lat,lng&to=lat,lng` | signed in (road route) |
+
+`/api/geo/*` allows 15 requests per 10 s per user. `POST /api/rides/estimate` and `POST /api/rides` take `pickup` and `dropoff` as `{ address, lat, lng }`. A plain address string is still accepted and mapped to made-up coordinates.
 
 ### Admin API (all require role `admin`)
 
@@ -309,7 +369,7 @@ Every action is appended to the ride's `events` timeline, together with who did 
 | GET    | `/api/admin/fleet` | Online drivers with location and current trip |
 | GET    | `/api/admin/trips/active` | All requested, accepted and ongoing rides |
 | GET    | `/api/admin/rides?view=open\|reported\|cancelled\|resolved\|all` | Dispute queue, with counts per view |
-| GET    | `/api/admin/rides/:id` | One ride with its full timeline |
+| GET    | `/api/admin/rides/:id` | One ride with its full timeline, routes and trail |
 | POST   | `/api/admin/rides/:id/refund` | `{ amount, reason }`, completed rides only |
 | POST   | `/api/admin/rides/:id/override` | `{ status: 'completed' \| 'cancelled', reason }` |
 | POST   | `/api/admin/rides/:id/resolve` | `{ resolution }` |
@@ -323,6 +383,10 @@ Every action is appended to the ride's `events` timeline, together with who did 
 | Live fleet map is grey with no streets | Map tiles come from openstreetmap.org, so the browser needs internet access. Drivers still appear in the list. |
 | Live fleet map is empty | No driver is online. Run `npm run seed` with `SIMULATE_DEMO_FLEET=true`, or sign in as a verified driver and go online. |
 | Driver gets "license and insurance must be approved" | Approve both documents in **Users & drivers → Documents**, or set `REQUIRE_DRIVER_VERIFICATION=false`. |
-| Driver location shows "Location permission denied" | The browser blocked GPS. The app falls back to a simulated route; allow location in the browser to use real GPS. |
+| Driver can't go online: "Location is required" | GPS mode needs location permission. Allow it in the browser's site settings (lock icon) and the phone's location settings, then try again. Over plain `http://` (not localhost), browsers block location entirely. |
+| Address search shows nothing or says "Searching too fast" | Photon needs internet access and is limited to about 1 request per second. Type a few more characters and wait a moment. Set `GEOCODER=mock` to work offline. |
+| Routes are straight lines | The routing service was unreachable (the server logs `routing failed`), or `ROUTING=straight`. Rides from before Level 3 also have no stored route. |
+| Driver's dev panel says "Finding a route…" | Cruising needs a route from `/api/geo/route`. Check the API log for routing errors. |
+| Passenger sees "No recent signal" | The driver hasn't sent a position for 30 s: GPS is lost, the driver app is in the background, or the phone is asleep. |
 | Sent back to the login page with "This account has been suspended" | An admin suspended the account. Reactivate it in **Users & drivers**. |
 | Signed in but landed on the wrong page | Each role has its own home page. Admin pages are only for emails in `ADMIN_EMAILS`, and the role is fixed at first sign-in. |

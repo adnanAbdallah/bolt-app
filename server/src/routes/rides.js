@@ -2,20 +2,63 @@ import { Router } from 'express';
 import { requireAuth, requireRole } from '../middleware/auth.js';
 import { asyncHandler, HttpError } from '../middleware/error.js';
 import { ACTIVE_STATUSES, REPORT_REASONS, Ride, TRANSITIONS } from '../models/Ride.js';
-import { estimateFare } from '../services/fare.js';
-import { emitRideUpdate } from '../services/realtime.js';
-import { populateParties, serializeRide } from '../services/rideView.js';
+import { env } from '../config/env.js';
+import { distanceM, offset } from '../lib/geometry.js';
+import { User } from '../models/User.js';
+import { estimateFare, resolvePlace } from '../services/fare.js';
+import { reverseGeocode } from '../services/geo.js';
+import { broadcastFleetUpdate, emitRideUpdate } from '../services/realtime.js';
+import { getRoute } from '../services/routing.js';
+import { populateParties, serializeOpenRequest, serializeRide } from '../services/rideView.js';
 
 const router = Router();
 router.use(requireAuth);
 
-function readAddresses(body) {
-  const pickup = typeof body?.pickup === 'string' ? body.pickup.trim() : '';
-  const dropoff = typeof body?.dropoff === 'string' ? body.dropoff.trim() : '';
-  if (!pickup || !dropoff) throw new HttpError(400, 'Pickup and dropoff are required');
-  if (pickup.length > 200 || dropoff.length > 200) throw new HttpError(400, 'Address too long');
-  if (pickup.toLowerCase() === dropoff.toLowerCase()) throw new HttpError(400, 'Pickup and dropoff must differ');
+const MIN_TRIP_M = 100;
+
+/** Pickup/dropoff as { address, lat, lng } (search result or map pin) or a plain address string. */
+function readPlaces(body) {
+  if (!body?.pickup || !body?.dropoff) throw new HttpError(400, 'Pickup and dropoff are required');
+  if (typeof body.pickup === 'string' && body.pickup.length > 200) throw new HttpError(400, 'Address too long');
+  if (typeof body.dropoff === 'string' && body.dropoff.length > 200) throw new HttpError(400, 'Address too long');
+  const pickup = resolvePlace(body.pickup);
+  const dropoff = resolvePlace(body.dropoff);
+  if (!pickup || !dropoff) throw new HttpError(400, 'Choose pickup and dropoff from the suggestions or the map');
+  if (distanceM(pickup, dropoff) < MIN_TRIP_M) throw new HttpError(400, 'Pickup and dropoff are too close together');
   return { pickup, dropoff };
+}
+
+/** Best-effort neighbourhood name for the pickup, so drivers see an area before accepting. */
+async function areaFor(place) {
+  if (place.area) return place.area;
+  const timeout = new Promise((r) => setTimeout(() => r(null), 2500));
+  const found = await Promise.race([reverseGeocode(place.lat, place.lng), timeout]);
+  return found?.area ?? null;
+}
+
+const SIM_RELOCATE_KM = 15;
+
+/**
+ * Road route from the driver's current position to the pickup, stored on the ride.
+ * In simulated mode a driver with no position, or one far away (e.g. the passenger
+ * booked in their real city while the demo map is elsewhere), is first placed ~1.5 km
+ * from the pickup so dev testing works anywhere.
+ */
+async function attachApproachRoute(ride, driverId) {
+  const driver = await User.findById(driverId);
+  const pickup = ride.pickupLocation;
+  if (!driver || pickup?.lat == null) return ride;
+  let from = driver.location?.lat != null ? driver.location : null;
+  if (env.locationMode === 'simulated' && (!from || distanceM(from, pickup) / 1000 > SIM_RELOCATE_KM)) {
+    const p = offset(pickup, 1500, Math.random() * 360);
+    driver.location = { lat: p.lat, lng: p.lng, heading: null, simulated: true, updatedAt: new Date() };
+    await driver.save();
+    from = driver.location;
+    broadcastFleetUpdate(driver).catch(console.error);
+  }
+  if (!from) return ride; // gps mode, no fix yet: clients draw a straight line once a fix arrives
+  const approachRoute = await getRoute(from, pickup);
+  return populateParties(Ride.findByIdAndUpdate(ride._id, { $set: { approachRoute } }, { new: true }));
 }
 
 /**
@@ -63,7 +106,7 @@ function respond(res, ride, status = 200) {
 router.post(
   '/estimate',
   asyncHandler(async (req, res) => {
-    const { pickup, dropoff } = readAddresses(req.body);
+    const { pickup, dropoff } = readPlaces(req.body);
     res.json(await estimateFare(pickup, dropoff));
   }),
 );
@@ -76,7 +119,14 @@ router.get(
     const ride = await populateParties(
       Ride.findOne({ [field]: req.user._id, status: { $in: ACTIVE_STATUSES } }).sort({ createdAt: -1 }),
     );
-    res.json({ ride: ride ? serializeRide(ride) : null });
+    if (!ride) return res.json({ ride: null });
+    const view = serializeRide(ride);
+    // A passenger gets their own driver's last known position while the ride is active.
+    if (req.user.role === 'passenger' && ride.driverId && ['accepted', 'ongoing'].includes(ride.status)) {
+      const d = await User.findById(ride.driverId._id ?? ride.driverId).select('location').lean();
+      view.driverLocation = d?.location?.lat != null ? d.location : null;
+    }
+    res.json({ ride: view });
   }),
 );
 
@@ -134,17 +184,19 @@ router.post(
   '/',
   requireRole('passenger'),
   asyncHandler(async (req, res) => {
-    const { pickup, dropoff } = readAddresses(req.body);
+    const { pickup, dropoff } = readPlaces(req.body);
 
     const existing = await Ride.exists({ passengerId: req.user._id, status: { $in: ACTIVE_STATUSES } });
     if (existing) throw new HttpError(409, 'You already have an active ride');
 
     // Always price server-side; never trust a client-supplied fare.
     const quote = await estimateFare(pickup, dropoff);
+    const area = await areaFor(quote.pickup);
     const ride = await Ride.create({
       passengerId: req.user._id,
-      pickupLocation: quote.pickup,
+      pickupLocation: { ...quote.pickup, area: area ?? undefined },
       dropoffLocation: quote.dropoff,
+      route: quote.route,
       fare: quote.fare,
       currency: quote.currency,
       distanceKm: quote.distanceKm,
@@ -184,7 +236,7 @@ router.get(
     const rides = await populateParties(
       Ride.find({ status: 'requested', driverId: null }).sort({ createdAt: 1 }).limit(20),
     );
-    res.json({ rides: rides.map((r) => serializeRide(r)) });
+    res.json({ rides: rides.map(serializeOpenRequest) });
   }),
 );
 
@@ -202,7 +254,8 @@ router.post(
       driverId: req.user._id,
       acceptedAt: new Date(),
     });
-    await respond(res, await findOr409(req.params.id, ride, 'Ride was already taken'));
+    const accepted = await findOr409(req.params.id, ride, 'Ride was already taken');
+    await respond(res, await attachApproachRoute(accepted, req.user._id));
   }),
 );
 

@@ -1,18 +1,20 @@
 import { env } from '../config/env.js';
 import { Ride } from '../models/Ride.js';
 import { User } from '../models/User.js';
+import { validLatLng } from '../lib/geometry.js';
+import { getRoute } from './routing.js';
 
 /**
- * Mock pricing engine for Level 1.
+ * Pricing engine. Distance and duration come from the road route (services/routing.js).
+ * The "dynamic" part is a surge multiplier driven by live demand (open requests)
+ * vs. supply (online drivers), plus a peak-hour bump.
  *
- * Without a maps provider we derive stable pseudo-coordinates from the address
- * text, so the same pickup/dropoff pair always yields the same distance.
- * The "dynamic" part is a surge multiplier driven by live demand
- * (open requests) vs. supply (online drivers), plus a peak-hour bump.
+ * mockGeocode() is the offline fallback: stable pseudo-coordinates derived from
+ * the address text, used by the seed script and when the geocoder is unreachable.
  */
 
-const AVG_SPEED_KMH = 24; // typical moto speed in city traffic
-export const CITY_CENTER = { lat: -1.2864, lng: 36.8172 }; // arbitrary anchor for mock coords
+/** Anchor for mock coordinates, the demo fleet and the default map view (MAP_CENTER). */
+export const CITY_CENTER = env.map.center;
 
 function hashString(str) {
   let h = 2166136261;
@@ -35,16 +37,6 @@ export function mockGeocode(address) {
   };
 }
 
-function haversineKm(a, b) {
-  const R = 6371;
-  const toRad = (d) => (d * Math.PI) / 180;
-  const dLat = toRad(b.lat - a.lat);
-  const dLng = toRad(b.lng - a.lng);
-  const s =
-    Math.sin(dLat / 2) ** 2 + Math.cos(toRad(a.lat)) * Math.cos(toRad(b.lat)) * Math.sin(dLng / 2) ** 2;
-  return 2 * R * Math.asin(Math.sqrt(s));
-}
-
 function peakHourMultiplier(date = new Date()) {
   const h = date.getHours();
   const isPeak = (h >= 7 && h < 10) || (h >= 17 && h < 20);
@@ -54,7 +46,7 @@ function peakHourMultiplier(date = new Date()) {
 export async function getSurgeMultiplier() {
   const [openRequests, onlineDrivers] = await Promise.all([
     Ride.countDocuments({ status: 'requested' }),
-    User.countDocuments({ role: 'driver', isOnline: true }),
+    User.countDocuments({ role: 'driver', isOnline: true, status: { $ne: 'banned' } }),
   ]);
   const ratio = openRequests / Math.max(onlineDrivers, 1);
   // 1.0x when supply meets demand, up to 2.0x at 4+ requests per driver.
@@ -65,13 +57,34 @@ export async function getSurgeMultiplier() {
 
 const round2 = (n) => Math.round(n * 100) / 100;
 
-export async function estimateFare(pickupAddress, dropoffAddress) {
-  const pickup = mockGeocode(pickupAddress);
-  const dropoff = mockGeocode(dropoffAddress);
+/**
+ * Accepts a place object { address, lat, lng, area? } (from search or a map pin) or,
+ * for older clients and the seed script, a plain address string (mock-geocoded).
+ */
+export function resolvePlace(input) {
+  if (typeof input === 'string') {
+    const text = input.trim();
+    return text ? { ...mockGeocode(text), area: null } : null;
+  }
+  if (!input || typeof input !== 'object') return null;
+  const address = typeof input.address === 'string' ? input.address.trim().slice(0, 200) : '';
+  if (!address || !validLatLng(input.lat, input.lng)) return null;
+  const area = typeof input.area === 'string' && input.area.trim() ? input.area.trim().slice(0, 80) : null;
+  return { address, lat: +input.lat.toFixed(6), lng: +input.lng.toFixed(6), area };
+}
 
-  // Road distance is longer than straight-line; 1.3 is a common approximation.
-  const distanceKm = Math.max(round2(haversineKm(pickup, dropoff) * 1.3), 0.5);
-  const durationMin = Math.max(Math.round((distanceKm / AVG_SPEED_KMH) * 60), 3);
+/**
+ * Price a trip from its road route. `offline: true` skips the routing service
+ * (straight line x 1.3), which the seed script uses.
+ */
+export async function estimateFare(pickupInput, dropoffInput, { offline = false } = {}) {
+  const pickup = resolvePlace(pickupInput);
+  const dropoff = resolvePlace(dropoffInput);
+  if (!pickup || !dropoff) throw Object.assign(new Error('Pickup and dropoff need an address and a location'), { status: 400 });
+
+  const route = await getRoute(pickup, dropoff, { offline });
+  const distanceKm = Math.max(route.distanceKm, 0.5);
+  const durationMin = Math.max(route.durationMin, 3);
 
   const { surge, openRequests, onlineDrivers } = await getSurgeMultiplier();
   const { base, perKm, perMin, minimum, currency } = env.fare;
@@ -82,6 +95,7 @@ export async function estimateFare(pickupAddress, dropoffAddress) {
   return {
     pickup,
     dropoff,
+    route,
     distanceKm,
     durationMin,
     surgeMultiplier: surge,

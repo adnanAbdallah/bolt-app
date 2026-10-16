@@ -30,12 +30,30 @@ export const canTransition = (from, to) => TRANSITIONS[from]?.includes(to) ?? fa
 const locationSchema = new mongoose.Schema(
   {
     address: { type: String, required: true, trim: true, maxlength: 200 },
-    // Mock coordinates for Level 1; replace with geocoding later.
     lat: Number,
     lng: Number,
+    // Neighbourhood/district name; shown to drivers instead of the exact pickup before they accept.
+    area: { type: String, maxlength: 80 },
   },
   { _id: false },
 );
+
+const routeSchema = new mongoose.Schema(
+  {
+    coordinates: { type: [[Number]], default: undefined }, // [[lat, lng], ...]
+    distanceKm: Number,
+    durationMin: Number,
+    source: { type: String, enum: ['osrm', 'straight'] },
+    computedAt: { type: Date, default: Date.now },
+  },
+  { _id: false },
+);
+
+const trailPointSchema = new mongoose.Schema({ lat: Number, lng: Number, at: Date }, { _id: false });
+
+/** Breadcrumbs are stored at most this far apart, and capped in count. */
+export const TRAIL_MIN_SPACING_M = 50;
+export const TRAIL_MAX_POINTS = 2000;
 
 const eventSchema = new mongoose.Schema(
   {
@@ -65,6 +83,13 @@ const rideSchema = new mongoose.Schema(
     durationMin: Number,
     surgeMultiplier: { type: Number, default: 1 },
     refundedAmount: { type: Number, default: 0, min: 0 },
+
+    /** Planned pickup → dropoff road route (what the fare was priced on). */
+    route: routeSchema,
+    /** Driver's position at accept time → pickup. */
+    approachRoute: routeSchema,
+    /** Where the driver actually went while accepted/ongoing (admin-only). */
+    trail: { type: [trailPointSchema], default: undefined },
 
     acceptedAt: Date,
     startedAt: Date,

@@ -1,12 +1,9 @@
-import { useEffect, useRef } from 'react';
-import L from 'leaflet';
-import 'leaflet/dist/leaflet.css';
-import { CITY_CENTER } from '../../lib/geo.js';
+import { useMemo } from 'react';
+import LazyMap from '../map/LazyMap.jsx';
+import { GLYPHS as BASE_GLYPHS, PIN_SIZE, pinHtml, vehicleHtml } from '../map/markers.js';
 
-// Driver names and plates are user-supplied; escape before they go into Leaflet's HTML.
-const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
-
-export const STALE_MS = 2 * 60 * 1000;
+/** Matches the passenger app: no position for 30 s means "No recent signal". */
+export const STALE_MS = 30 * 1000;
 
 /** available | pickup | trip | stale: drives both the marker and the list legend. */
 export function driverState(d) {
@@ -18,12 +15,8 @@ export function driverState(d) {
 
 // Colors validated for colorblind separation; each state also has its own glyph so
 // identity never depends on color alone.
-const GLYPHS = {
-  available: '<circle cx="18.5" cy="17.5" r="3.5"/><circle cx="5.5" cy="17.5" r="3.5"/><path d="M12 17.5V14l-3-3 4-3 2 3h2"/>',
-  pickup: '<polygon points="3 11 22 2 13 21 11 13 3 11"/>',
-  trip: '<circle cx="12" cy="8" r="4"/><path d="M5 21a7 7 0 0 1 14 0"/>',
-  stale: '<path d="M5 12h14"/>',
-};
+const GLYPHS = { available: BASE_GLYPHS.bike, pickup: BASE_GLYPHS.nav, trip: BASE_GLYPHS.person, stale: BASE_GLYPHS.dash };
+const GLYPH_NAME = { available: 'bike', pickup: 'nav', trip: 'person', stale: 'dash' };
 
 export const STATE_STYLE = {
   available: { label: 'Available', color: '#16a34a' },
@@ -38,89 +31,56 @@ export function StateGlyph({ state, className = 'h-3 w-3' }) {
   );
 }
 
-function icon(d, selected) {
-  const state = driverState(d);
-  const { color } = STATE_STYLE[state];
-  const heading = d.location?.heading;
-  const arrow =
-    heading != null
-      ? `<span style="position:absolute;inset:-7px;transform:rotate(${heading}deg)"><span style="position:absolute;left:50%;top:0;transform:translateX(-50%);width:0;height:0;border-left:5px solid transparent;border-right:5px solid transparent;border-bottom:7px solid ${color}"></span></span>`
-      : '';
-  const size = selected ? 30 : 24;
-  return L.divIcon({
-    className: '',
-    iconSize: [size, size],
-    iconAnchor: [size / 2, size / 2],
-    html: `<span style="position:relative;display:flex;width:${size}px;height:${size}px;border-radius:9999px;background:${color};border:3px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.35)${selected ? `,0 0 0 4px ${color}55` : ''};align-items:center;justify-content:center">${arrow}<svg width="${size * 0.5}" height="${size * 0.5}" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">${GLYPHS[state]}</svg></span>`,
-  });
-}
-
-/** Leaflet map of online drivers. Markers are updated in place so live moves don't flicker. */
-export default function FleetMap({ drivers, selectedId, onSelect, className = '' }) {
-  const el = useRef(null);
-  const map = useRef(null);
-  const markers = useRef(new Map());
-  const fitted = useRef(false);
-
-  useEffect(() => {
-    map.current = L.map(el.current, { zoomControl: true }).setView([CITY_CENTER.lat, CITY_CENTER.lng], 13);
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      maxZoom: 19,
-      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
-    }).addTo(map.current);
-    const ro = new ResizeObserver(() => map.current?.invalidateSize());
-    ro.observe(el.current);
-    return () => {
-      ro.disconnect();
-      map.current.remove();
-      map.current = null;
-      markers.current.clear();
-      fitted.current = false;
-    };
-  }, []);
-
-  useEffect(() => {
-    const m = map.current;
-    if (!m) return;
-    const seen = new Set();
-    for (const d of drivers) {
-      if (!d.location) continue;
-      seen.add(d.id);
-      const pos = [d.location.lat, d.location.lng];
-      const tip = `<strong>${esc(d.name)}</strong><br>${STATE_STYLE[driverState(d)].label}${d.vehicle?.plate ? ` · ${esc(d.vehicle.plate)}` : ''}`;
-      let mk = markers.current.get(d.id);
-      if (!mk) {
-        mk = L.marker(pos, { icon: icon(d, d.id === selectedId) }).addTo(m);
-        mk.on('click', () => onSelect?.(d.id));
-        mk.bindTooltip(tip, { direction: 'top', offset: [0, -14] });
-        markers.current.set(d.id, mk);
-      } else {
-        mk.setLatLng(pos);
-        mk.setIcon(icon(d, d.id === selectedId));
-        mk.setTooltipContent(tip);
-      }
-      mk.setZIndexOffset(d.id === selectedId ? 1000 : 0);
-    }
-    for (const [id, mk] of markers.current) {
-      if (!seen.has(id)) {
-        mk.remove();
-        markers.current.delete(id);
+/**
+ * Admin map of online drivers. With a selected driver on a trip, `trip` (the full admin ride)
+ * adds their route and pickup/dropoff pins.
+ */
+export default function FleetMap({ drivers, selectedId, onSelect, trip, className = '' }) {
+  const markers = useMemo(() => {
+    const list = drivers
+      .filter((d) => d.location)
+      .map((d) => {
+        const state = driverState(d);
+        const selected = d.id === selectedId;
+        const size = selected ? 32 : 26;
+        return {
+          id: d.id,
+          lat: d.location.lat,
+          lng: d.location.lng,
+          html: vehicleHtml({ color: STATE_STYLE[state].color, glyph: GLYPH_NAME[state], size, selected, showHeading: d.location.heading != null }),
+          size: [size, size],
+          rotation: d.location.heading ?? null,
+          animate: true,
+          zIndex: selected ? 1000 : 0,
+          tooltip: `${d.name}\n${STATE_STYLE[state].label}${d.vehicle?.plate ? ` · ${d.vehicle.plate}` : ''}`,
+          onClick: () => onSelect?.(d.id),
+        };
+      });
+    if (trip) {
+      for (const kind of ['pickup', 'dropoff']) {
+        const place = kind === 'pickup' ? trip.pickupLocation : trip.dropoffLocation;
+        const [w, h, ax, ay] = PIN_SIZE[kind];
+        list.push({ id: `trip-${kind}`, lat: place.lat, lng: place.lng, html: pinHtml(kind), size: [w, h], anchor: [ax, ay], tooltip: `${kind === 'pickup' ? 'Pickup' : 'Dropoff'}: ${place.address}` });
       }
     }
-    // Frame the fleet once, on first data; after that the admin controls the view.
-    if (!fitted.current && seen.size) {
-      const pts = drivers.filter((d) => d.location).map((d) => [d.location.lat, d.location.lng]);
-      m.fitBounds(pts, { padding: [40, 40], maxZoom: 15 });
-      fitted.current = true;
-    }
-  }, [drivers, selectedId, onSelect]);
+    return list;
+  }, [drivers, selectedId, onSelect, trip]);
 
-  useEffect(() => {
-    const d = drivers.find((x) => x.id === selectedId);
-    if (d?.location && map.current) map.current.panTo([d.location.lat, d.location.lng], { animate: true });
-    // only when the selection changes
+  const lines = useMemo(() => {
+    if (!trip) return [];
+    const route = trip.route?.coordinates ?? [[trip.pickupLocation.lat, trip.pickupLocation.lng], [trip.dropoffLocation.lat, trip.dropoffLocation.lng]];
+    const out = [{ id: 'trip-route', coords: route, color: STATE_STYLE.trip.color, weight: trip.status === 'ongoing' ? 6 : 4, dashArray: trip.status === 'ongoing' ? null : '8 8', opacity: trip.status === 'ongoing' ? 0.9 : 0.6 }];
+    if (trip.status === 'accepted' && trip.approachRoute) out.push({ id: 'trip-approach', coords: trip.approachRoute.coordinates, color: STATE_STYLE.pickup.color, weight: 6 });
+    return out;
+  }, [trip]);
+
+  // Frame the fleet once on first data; afterwards, frame the selected trip.
+  const located = drivers.filter((d) => d.location);
+  const fit = useMemo(() => {
+    if (trip) return { key: `trip:${trip.id}:${trip.status}`, points: [...(trip.approachRoute?.coordinates ?? []), ...(trip.route?.coordinates ?? []), [trip.pickupLocation.lat, trip.pickupLocation.lng], [trip.dropoffLocation.lat, trip.dropoffLocation.lng]] };
+    return located.length ? { key: 'fleet', points: located.map((d) => [d.location.lat, d.location.lng]), maxZoom: 15 } : null;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedId]);
+  }, [trip?.id, trip?.status, located.length > 0]);
 
-  return <div ref={el} className={`isolate ${className}`} role="region" aria-label="Map of online drivers" />;
+  return <LazyMap markers={markers} lines={lines} fit={fit} className={className} label="Map of online drivers" />;
 }

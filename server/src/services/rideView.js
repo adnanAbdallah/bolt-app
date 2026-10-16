@@ -20,7 +20,12 @@ const party = (p, admin) =>
       }
     : null;
 
-/** `admin: true` adds contact details and the full audit trail. */
+const routeView = (r) =>
+  r?.coordinates?.length >= 2
+    ? { coordinates: r.coordinates, distanceKm: r.distanceKm, durationMin: r.durationMin, source: r.source }
+    : null;
+
+/** `admin: true` adds contact details, the driver's breadcrumb trail and the full audit trail. */
 export function serializeRide(ride, { admin = false } = {}) {
   const o = ride.toObject ? ride.toObject({ versionKey: false }) : ride;
   return {
@@ -34,6 +39,8 @@ export function serializeRide(ride, { admin = false } = {}) {
     durationMin: o.durationMin,
     surgeMultiplier: o.surgeMultiplier,
     refundedAmount: o.refundedAmount ?? 0,
+    route: routeView(o.route),
+    approachRoute: routeView(o.approachRoute),
     passenger: party(o.passengerId, admin),
     driver: party(o.driverId, admin),
     createdAt: o.createdAt,
@@ -56,6 +63,7 @@ export function serializeRide(ride, { admin = false } = {}) {
       resolvedAt: o.dispute?.resolvedAt ?? null,
     },
     ...(admin && {
+      trail: (o.trail ?? []).map((t) => [t.lat, t.lng]),
       events: (o.events ?? []).map((e) => ({
         type: e.type,
         from: e.from ?? null,
@@ -66,5 +74,32 @@ export function serializeRide(ride, { admin = false } = {}) {
         at: e.at,
       })),
     }),
+  };
+}
+
+/** ~550 m grid. Snapping (not random jitter) so repeated polling can't average it out. */
+const APPROX_GRID_DEG = 0.005;
+export const APPROX_RADIUS_M = 600;
+const snap = (n) => +(Math.round(n / APPROX_GRID_DEG) * APPROX_GRID_DEG).toFixed(4);
+
+/**
+ * What a driver sees of an open request before accepting: the pickup's neighbourhood and
+ * an approximate circle, no exact address, route line or passenger phone number.
+ */
+export function serializeOpenRequest(ride) {
+  const v = serializeRide(ride);
+  const p = v.pickupLocation;
+  return {
+    ...v,
+    pickupLocation: {
+      address: p.area ? `Near ${p.area}` : 'Exact pickup shown after you accept',
+      area: p.area ?? null,
+      lat: p.lat != null ? snap(p.lat) : null,
+      lng: p.lng != null ? snap(p.lng) : null,
+      approximate: true,
+      radiusM: APPROX_RADIUS_M,
+    },
+    route: null,
+    passenger: v.passenger && { ...v.passenger, phone: null },
   };
 }

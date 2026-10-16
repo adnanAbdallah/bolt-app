@@ -14,7 +14,8 @@ export default function Fleet() {
   const [loaded, setLoaded] = useState(false);
   const [selectedId, setSelectedId] = useState(null);
   const [q, setQ] = useState('');
-  const [, tick] = useState(0);
+  const [now, tick] = useState(0);
+  const [trip, setTrip] = useState(null);
 
   const load = useCallback(async () => {
     const { drivers: list } = await api.admin.fleet();
@@ -41,7 +42,23 @@ export default function Fleet() {
     return () => clearInterval(id);
   }, []);
 
-  const list = useMemo(() => [...drivers.values()], [drivers]);
+  // `now` re-derives states every 10 s so silent drivers turn "No recent signal".
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const list = useMemo(() => [...drivers.values()], [drivers, now]);
+
+  // Selected driver on a trip: load the full ride for its route and pickup/dropoff.
+  const selectedTripId = drivers.get(selectedId)?.trip?.id ?? null;
+  useEffect(() => {
+    if (!selectedTripId) return setTrip(null);
+    let cancelled = false;
+    api.admin.ride(selectedTripId).then(({ ride }) => !cancelled && setTrip(ride)).catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedTripId]);
+  useSocketEvent('ride:updated', ({ ride }) => {
+    if (ride.id === selectedTripId) setTrip(ride);
+  });
   const counts = useMemo(() => Object.fromEntries(ORDER.map((s) => [s, list.filter((d) => driverState(d) === s).length])), [list]);
   const shown = list
     .filter((d) => !q || `${d.name} ${d.vehicle?.plate ?? ''}`.toLowerCase().includes(q.toLowerCase()))
@@ -65,7 +82,7 @@ export default function Fleet() {
 
       <div className="grid gap-4 lg:grid-cols-[1fr_20rem]">
         <div className="overflow-hidden rounded-2xl border border-gray-200/70 bg-white">
-          <FleetMap drivers={list} selectedId={selectedId} onSelect={onSelect} className="h-[60vh] min-h-[22rem] w-full lg:h-[calc(100vh-13rem)]" />
+          <FleetMap drivers={list} selectedId={selectedId} onSelect={onSelect} trip={trip} className="h-[60vh] min-h-[22rem] w-full lg:h-[calc(100vh-13rem)]" />
         </div>
 
         <aside className="flex max-h-[calc(100vh-13rem)] min-h-0 flex-col rounded-2xl border border-gray-200/70 bg-white">

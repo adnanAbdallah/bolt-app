@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useOutletContext } from 'react-router-dom';
 import { CircleDollarSign, Flag, Gavel, Scale, ShieldAlert, XCircle } from 'lucide-react';
 import { useSocketEvent } from '../../context/SocketContext.jsx';
@@ -7,6 +7,10 @@ import { PageHeader } from '../../components/admin/AdminLayout.jsx';
 import { OverrideDialog, RefundDialog, ResolveDialog } from '../../components/admin/RideDialogs.jsx';
 import { Badge, EmptyState, Pagination, Panel, Tabs, btn } from '../../components/admin/ui.jsx';
 import RouteSummary from '../../components/RouteSummary.jsx';
+import LazyMap from '../../components/map/LazyMap.jsx';
+import { PIN_SIZE, pinHtml } from '../../components/map/markers.js';
+import { lineLength } from '../../lib/geometry.js';
+import { formatKm } from '../../lib/geo.js';
 import StatusBadge from '../../components/StatusBadge.jsx';
 import Spinner from '../../components/Spinner.jsx';
 
@@ -60,6 +64,56 @@ function Timeline({ ride }) {
         </li>
       ))}
     </ol>
+  );
+}
+
+const PLANNED = '#2563eb';
+const ACTUAL = '#ea580c';
+
+/** Planned route vs. where the driver actually went, for "wrong or long route" reports. */
+function RouteCheck({ ride }) {
+  const planned = ride.route?.coordinates ?? [[ride.pickupLocation.lat, ride.pickupLocation.lng], [ride.dropoffLocation.lat, ride.dropoffLocation.lng]];
+  const trail = ride.trail ?? [];
+  const markers = useMemo(
+    () =>
+      ['pickup', 'dropoff'].map((kind) => {
+        const place = kind === 'pickup' ? ride.pickupLocation : ride.dropoffLocation;
+        const [w, h, ax, ay] = PIN_SIZE[kind];
+        return { id: kind, lat: place.lat, lng: place.lng, html: pinHtml(kind), size: [w, h], anchor: [ax, ay], tooltip: place.address };
+      }),
+    [ride.pickupLocation, ride.dropoffLocation],
+  );
+  const lines = useMemo(
+    () => [
+      { id: 'planned', coords: planned, color: PLANNED, weight: 6, opacity: 0.55, dashArray: ride.route ? null : '8 8' },
+      { id: 'actual', coords: trail, color: ACTUAL, weight: 4, opacity: 0.95 },
+    ],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [ride.id, trail.length, Boolean(ride.route)],
+  );
+  const fit = useMemo(() => ({ key: ride.id, points: [...planned, ...trail] }), [ride.id]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Compare drawn line to drawn line (the fare's distance may include a road factor).
+  const plannedM = lineLength(planned);
+  const actualM = lineLength(trail);
+
+  return (
+    <div className="overflow-hidden rounded-xl border border-gray-100">
+      <LazyMap markers={markers} lines={lines} fit={fit} className="h-64 w-full" label="Planned route and actual trail" />
+      <div className="flex flex-wrap gap-x-5 gap-y-1 px-4 py-2.5 text-xs text-gray-600">
+        <span className="inline-flex items-center gap-2">
+          <span className="h-1 w-5 rounded-full opacity-60" style={{ background: PLANNED }} /> Planned route · {formatKm(plannedM)}
+          {!ride.route && ' (straight line, no road route stored)'}
+        </span>
+        {trail.length > 1 ? (
+          <span className="inline-flex items-center gap-2">
+            <span className="h-1 w-5 rounded-full" style={{ background: ACTUAL }} /> Driver's actual trail · {formatKm(actualM)}
+            {plannedM > 0 && actualM > plannedM * 1.25 && <Badge tone="amber">{Math.round((actualM / plannedM - 1) * 100)}% longer than planned</Badge>}
+          </span>
+        ) : (
+          <span>No GPS trail was recorded for this ride.</span>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -129,6 +183,8 @@ function Detail({ ride, onChange }) {
           </div>
         ))}
       </dl>
+
+      <RouteCheck ride={ride} />
 
       <div className="rounded-xl border border-gray-100 p-4">
         <RouteSummary pickup={ride.pickupLocation.address} dropoff={ride.dropoffLocation.address} />
