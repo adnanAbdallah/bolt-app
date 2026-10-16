@@ -12,7 +12,7 @@ import { User } from '../models/User.js';
  */
 
 const AVG_SPEED_KMH = 24; // typical moto speed in city traffic
-const CITY_CENTER = { lat: -1.2864, lng: 36.8172 }; // arbitrary anchor for mock coords
+export const CITY_CENTER = { lat: -1.2864, lng: 36.8172 }; // arbitrary anchor for mock coords
 
 function hashString(str) {
   let h = 2166136261;

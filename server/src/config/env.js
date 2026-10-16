@@ -23,6 +23,10 @@ export const env = {
     .map((e) => e.trim().toLowerCase())
     .filter(Boolean),
   devLogin: process.env.ENABLE_DEV_LOGIN === 'true' && process.env.NODE_ENV !== 'production',
+  // Drivers need approved license + insurance before they can go online.
+  requireDriverVerification: process.env.REQUIRE_DRIVER_VERIFICATION !== 'false',
+  // Dev only: seeded demo drivers drive around so the admin fleet map has something to show.
+  simulateDemoFleet: process.env.SIMULATE_DEMO_FLEET === 'true' && process.env.NODE_ENV !== 'production',
   fare: {
     currency: process.env.FARE_CURRENCY || 'USD',
     base: num(process.env.FARE_BASE, 1.0),

@@ -12,6 +12,19 @@ export const TRANSITIONS = {
   cancelled: [],
 };
 
+/** Statuses an admin may force a ride into, from any other status (dispute resolution). */
+export const OVERRIDE_STATUSES = ['completed', 'cancelled'];
+
+export const REPORT_REASONS = {
+  overcharged: 'Overcharged',
+  driver_behavior: 'Driver behaviour',
+  passenger_behavior: 'Passenger behaviour',
+  safety: 'Safety concern',
+  route: 'Wrong or long route',
+  no_show: 'No-show',
+  other: 'Other',
+};
+
 export const canTransition = (from, to) => TRANSITIONS[from]?.includes(to) ?? false;
 
 const locationSchema = new mongoose.Schema(
@@ -20,6 +33,20 @@ const locationSchema = new mongoose.Schema(
     // Mock coordinates for Level 1; replace with geocoding later.
     lat: Number,
     lng: Number,
+  },
+  { _id: false },
+);
+
+const eventSchema = new mongoose.Schema(
+  {
+    type: { type: String, required: true }, // status | report | refund | override | resolve
+    from: String,
+    to: String,
+    by: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    byRole: String,
+    note: String,
+    amount: Number,
+    at: { type: Date, default: Date.now },
   },
   { _id: false },
 );
@@ -37,16 +64,35 @@ const rideSchema = new mongoose.Schema(
     distanceKm: Number,
     durationMin: Number,
     surgeMultiplier: { type: Number, default: 1 },
+    refundedAmount: { type: Number, default: 0, min: 0 },
 
     acceptedAt: Date,
     startedAt: Date,
     completedAt: Date,
     cancelledAt: Date,
     cancelledBy: { type: String, enum: ['passenger', 'driver', 'admin'] },
+
+    report: {
+      by: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+      byRole: String,
+      reason: { type: String, enum: Object.keys(REPORT_REASONS) },
+      details: { type: String, maxlength: 1000 },
+      createdAt: Date,
+    },
+    dispute: {
+      status: { type: String, enum: ['none', 'open', 'resolved'], default: 'none', index: true },
+      resolution: { type: String, maxlength: 1000 },
+      resolvedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+      resolvedAt: Date,
+    },
+
+    /** Append-only audit trail shown in the admin dispute view. */
+    events: { type: [eventSchema], default: [] },
   },
   { timestamps: true },
 );
 
 rideSchema.index({ status: 1, createdAt: 1 });
+rideSchema.index({ completedAt: 1 });
 
 export const Ride = mongoose.model('Ride', rideSchema);

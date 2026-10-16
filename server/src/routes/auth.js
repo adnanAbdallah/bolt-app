@@ -31,8 +31,8 @@ router.get('/google', (req, res, next) => {
 // Step 2: Google redirects back here
 router.get('/google/callback', (req, res, next) => {
   passport.authenticate('google', { session: false }, (err, user, info) => {
-    if (err || !user) {
-      const reason = err ? 'server_error' : info?.message || 'auth_failed';
+    if (err || !user || user.status === 'banned') {
+      const reason = err ? 'server_error' : user ? 'account_banned' : info?.message || 'auth_failed';
       return res.redirect(`${env.clientUrl}/login?error=${encodeURIComponent(reason)}`);
     }
     setAuthCookie(res, signAuthToken(user));
@@ -50,9 +50,10 @@ if (env.devLogin) {
       const user = await upsertGoogleUser({
         googleId: `dev-${email.toLowerCase()}`,
         email,
-        name: name || email.split('@')[0],
+        name: typeof name === 'string' && name.trim() ? name.trim() : undefined,
         requestedRole: role,
       });
+      if (user.status === 'banned') throw new HttpError(403, 'This account has been suspended');
       setAuthCookie(res, signAuthToken(user));
       res.json({ user: user.toPublicJSON(), redirectTo: homePathFor(user.role) });
     }),

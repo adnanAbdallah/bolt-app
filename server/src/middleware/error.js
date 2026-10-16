@@ -14,6 +14,7 @@ export function notFound(req, res) {
 
 // eslint-disable-next-line no-unused-vars
 export function errorHandler(err, req, res, next) {
+  if (res.headersSent) return next(err);
   if (err.name === 'CastError') return res.status(400).json({ error: 'Invalid id' });
   if (err.name === 'ValidationError') return res.status(400).json({ error: err.message });
 

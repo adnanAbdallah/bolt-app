@@ -6,7 +6,9 @@
   "main": "src/index.js",
   "scripts": {
     "dev": "node --watch --env-file=.env src/index.js",
-    "start": "node --env-file=.env src/index.js"
+    "start": "node --env-file=.env src/index.js",
+    "seed": "node --env-file=.env scripts/seed.js",
+    "seed:clear": "node --env-file=.env scripts/seed.js --clear"
   },
   "dependencies": {
     "cookie-parser": "^1.4.7",
@@ -15,6 +17,7 @@
     "jsonwebtoken": "^9.0.2",
     "mongoose": "^8.9.0",
     "passport": "^0.7.0",
-    "passport-google-oauth20": "^2.0.0"
+    "passport-google-oauth20": "^2.0.0",
+    "socket.io": "^4.8.4"
   }
 }
