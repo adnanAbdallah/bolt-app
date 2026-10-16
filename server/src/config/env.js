@@ -8,7 +8,7 @@ const num = (v, fallback) => (v === undefined || v === '' ? fallback : Number(v)
 export const env = {
   nodeEnv: process.env.NODE_ENV || 'development',
   isProd: process.env.NODE_ENV === 'production',
-  port: num(process.env.PORT, 5000),
+  port: num(process.env.PORT, 5001),
   mongoUri: process.env.MONGODB_URI,
   jwtSecret: process.env.JWT_SECRET,
   jwtExpiresIn: process.env.JWT_EXPIRES_IN || '7d',
@@ -16,7 +16,7 @@ export const env = {
     clientId: process.env.GOOGLE_CLIENT_ID,
     clientSecret: process.env.GOOGLE_CLIENT_SECRET,
   },
-  serverUrl: process.env.SERVER_URL || 'http://localhost:5000',
+  serverUrl: process.env.SERVER_URL || 'http://localhost:5001',
   clientUrl: process.env.CLIENT_URL || 'http://localhost:5173',
   adminEmails: (process.env.ADMIN_EMAILS || '')
     .split(',')

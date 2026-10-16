@@ -5,7 +5,7 @@ Motorcycle ride-hailing app: Google sign-in, passenger booking with dynamic fare
 ## Structure
 
 ```
-server/                      Express + Mongoose API (port 5000)
+server/                      Express + Mongoose API (port 5001)
   src/
     index.js                 App bootstrap, middleware, route mounting
     config/
@@ -56,7 +56,7 @@ npm install
 npm run dev             # http://localhost:5173
 ```
 
-In development, Vite proxies `/api` to `localhost:5000`, so the auth cookie is same-origin.
+In development, Vite proxies `/api` to `localhost:5001`, so the auth cookie is same-origin.
 
 ### Google sign-in setup
 
@@ -91,7 +91,7 @@ You don't need to add scopes. The app asks only for basic profile and email, whi
    - **Application type:** Web application
    - **Name:** `Bolt Moto local`
    - **Authorized JavaScript origins:** `http://localhost:5173`
-   - **Authorized redirect URIs:** `http://localhost:5000/api/auth/google/callback` (exact match, no trailing slash)
+   - **Authorized redirect URIs:** `http://localhost:5001/api/auth/google/callback` (exact match, no trailing slash)
 8. Click **Create**. Copy the **Client ID** and **Client secret** right away, or click **Download JSON**. Google may not show the secret again. If you lose it, add a new secret to the same client.
 
 #### 4. Add the keys to the project
@@ -128,7 +128,7 @@ An account's role is set the first time it signs in. Signing in later with the o
 
 | Error | Fix |
 |---|---|
-| `Error 400: redirect_uri_mismatch` | The redirect URI in Google must be exactly `http://localhost:5000/api/auth/google/callback`. Check http vs https, the port, and that there is no trailing slash. |
+| `Error 400: redirect_uri_mismatch` | The redirect URI in Google must be exactly `http://localhost:5001/api/auth/google/callback`. Check http vs https, the port, and that there is no trailing slash. |
 | `Error 403: access_denied` | The Gmail account isn't a test user. Add it under **Audience → Test users**. |
 | `invalid_client` | The client ID or secret is wrong. Check `.env` for extra spaces or quotes, then restart the server. |
 | Google button is greyed out | The server wasn't restarted after editing `.env`, or one of the two values is empty. |

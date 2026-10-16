@@ -7,6 +7,6 @@ export default defineConfig({
   server: {
     port: 5173,
     // Same-origin API calls in dev so the httpOnly auth cookie just works.
-    proxy: { '/api': 'http://localhost:5000' },
+    proxy: { '/api': 'http://localhost:5001' },
   },
 });
