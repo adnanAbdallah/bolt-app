@@ -5,3 +5,6 @@ dist/
 
 # Google OAuth credentials downloaded from Cloud Console
 client_secret_*.json
+
+# Personal test notes (contains credentials)
+test.txt
